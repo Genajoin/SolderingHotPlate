@@ -64,6 +64,13 @@ void toneOff()
   analogWrite(BUZZER_PIN, 0);
 }
 
+void toneKeyPress()
+{
+  toneOn();
+  delay(100);
+  toneOff();
+}
+
 void RelayOn()
 {
   digitalWrite(RELAY_PIN, HIGH);
@@ -125,18 +132,22 @@ void checkKeys()
   if (digitalRead(KEY_PLUS_PIN) == LOW)
   {
     Setpoint++;
+    toneKeyPress();
   }
   if (digitalRead(KEY_MINUS_PIN) == LOW)
   {
     Setpoint--;
+    toneKeyPress();
   }
   if (digitalRead(KEY_OK_PIN) == LOW)
   {
     plateMode = MODE0;
+    toneKeyPress();
   }
   if (digitalRead(KEY_BACK_PIN) == LOW)
   {
     plateMode = OFF;
+    toneKeyPress();
   }
 }
 
