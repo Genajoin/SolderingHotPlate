@@ -1,15 +1,5 @@
 #include <Arduino.h>
 #include "LiquidCrystal.h" // https://github.com/arduino-libraries/LiquidCrystal
-#include <Thermistor.h>
-#include <NTC_Thermistor.h> // https://github.com/YuriiSalimov/NTC_Thermistor
-#include <SmoothThermistor.h>
-
-#define SENSOR_PIN A0
-#define REFERENCE_RESISTANCE 4700
-#define NOMINAL_RESISTANCE 100000
-#define NOMINAL_TEMPERATURE 25
-#define B_VALUE 3950
-#define SMOOTHING_FACTOR 15
 
 #define CONTRAST_PIN 3
 #define LCD_LED_PIN 9
@@ -45,7 +35,6 @@ unsigned long windowStartTime, nextSwitchTime, nextLcdTime, nextKeyTime;
 float Input, Output;
 bool relayStatus = false;
 LiquidCrystal lcd(12, 11, 2, 4, 6, 7);
-Thermistor *thermistor;
 
 void toneOn()
 {
@@ -113,9 +102,26 @@ void lcdPrint()
   }
 }
 
+//********************         TERMISTOR    **************
+#define SENSOR_PIN A0
+#define REFERENCE_RESISTANCE 4700.f
+#define NOMINAL_RESISTANCE 100000.f
+#define NOMINAL_TEMPERATURE 25.f + 273.15f
+#define B_VALUE 3950.f
+#define SMOOTHING_FACTOR 12.f
+
 void readTemperature()
 {
-  Input = thermistor->readCelsius();
+  const float resistance = REFERENCE_RESISTANCE / ((1023 / analogRead(SENSOR_PIN)) - 1);
+  float kelvin;
+  kelvin = resistance / NOMINAL_RESISTANCE; // (R/Ro)
+  kelvin = log(kelvin);                     // ln(R/Ro)
+  kelvin /= B_VALUE;                        // 1/B * ln(R/Ro)
+  kelvin += 1.0f / (NOMINAL_TEMPERATURE);   // + (1/To)
+  kelvin = 1.0f / kelvin;                   // Invert
+
+  Input = (Input * (SMOOTHING_FACTOR - 1.0f) + kelvin - 273.15f) / SMOOTHING_FACTOR;
+  // Input = kelvin - 273.15;
 }
 
 void checkKeys()
@@ -236,14 +242,6 @@ void setup()
   toneOn();
   delay(500);
   toneOff();
-  thermistor = new SmoothThermistor(
-      new NTC_Thermistor(
-          SENSOR_PIN,
-          REFERENCE_RESISTANCE,
-          NOMINAL_RESISTANCE,
-          NOMINAL_TEMPERATURE,
-          B_VALUE),
-      SMOOTHING_FACTOR);
 }
 
 void loop()
