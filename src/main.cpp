@@ -1,6 +1,5 @@
 #include <Arduino.h>
 #include "LiquidCrystal.h" // https://github.com/arduino-libraries/LiquidCrystal
-#include "QuickPID.h"      // https://github.com/Dlloydev/QuickPID
 #include <Thermistor.h>
 #include <NTC_Thermistor.h> // https://github.com/YuriiSalimov/NTC_Thermistor
 #include <SmoothThermistor.h>
@@ -31,33 +30,28 @@ enum PlateMode
   MODE1
 };
 
+#ifdef DEBUG
+PlateMode plateMode = MODE0;
+float Setpoint = 300.0;
+#else
 PlateMode plateMode = OFF;
-int contrast = 116;
-int ledBright = 100;
+float Setpoint = 150.0;
+#endif
+int contrast = 116;  // init pwm [0;255]
+int ledBright = 100; // init pwm [0;255]
 const char array1[] = "HeatPlateAlpisto";
-
 unsigned long msNow;
-
-// user settings
-const unsigned long windowSize = 5000;
-const byte debounce = 50;
-float Input, Output, Setpoint = 200, Kp = 2, Ki = 5, Kd = 1;
-
-// status
 unsigned long windowStartTime, nextSwitchTime, nextLcdTime, nextKeyTime;
-boolean relayStatus = false;
-Thermistor *thermistor;
-QuickPID myPID(&Input, &Output, &Setpoint, Kp, Ki, Kd,
-               myPID.pMode::pOnError,
-               myPID.dMode::dOnMeas,
-               myPID.iAwMode::iAwClamp,
-               myPID.Action::direct);
-
+float Input, Output;
+bool relayStatus = false;
 LiquidCrystal lcd(12, 11, 2, 4, 6, 7);
+Thermistor *thermistor;
 
 void toneOn()
 {
+#ifndef DEBUG
   analogWrite(BUZZER_PIN, 128);
+#endif
 }
 void toneOff()
 {
@@ -92,7 +86,7 @@ void lcdPrint()
   lcd.setCursor(0, 0);
   lcd.print(array1);
   lcd.setCursor(0, 1);
-  lcd.print("C:");
+  lcd.print("T:");
   lcd.setCursor(2, 1);
   lcd.print(Input, 0);
   lcd.setCursor(6, 1);
@@ -151,32 +145,84 @@ void checkKeys()
   }
 }
 
+//*****************    PID    ************
+#define PID_TIMEOUT_MS 100
+#define PID_ELAPSED_TIME_S (float)PID_TIMEOUT_MS / 1000.0
+#define RELAY_DEBOUNCE_MS 500
+#define PID_MIN 0
+#define PID_MAX 350
+#define PID_OUTPUT_RELAY_BOUND 100
+float Kp = 0.1, Ki = 0.1, Kd = 0.01;
+const unsigned long windowSize = 5000;
+float dP, dI, dD;
+float errorPID, pervErrorPID;
+
+inline float limit(float *val)
+{
+  return (*val > PID_MAX) ? PID_MAX : (*val < PID_MIN) ? PID_MIN
+                                                       : *val;
+}
+
 void checkPID()
 {
-  if (myPID.Compute())
-    windowStartTime = msNow;
+  if (msNow < PID_TIMEOUT_MS)
+    return;
+  windowStartTime += PID_TIMEOUT_MS;
+  pervErrorPID = errorPID;
+  errorPID = Setpoint - Input;
+  dP = Kp * errorPID;
+  dI += Ki * errorPID * PID_ELAPSED_TIME_S;
+  dD = Kd * (errorPID - pervErrorPID) / PID_ELAPSED_TIME_S;
+  dI = limit(&dI);
+  Output = dP + dI + dD;
+  Output = limit(&Output);
 
-  if (!relayStatus && Output > (msNow - windowStartTime))
+  if (!relayStatus && Output > PID_OUTPUT_RELAY_BOUND)
   {
     if (msNow > nextSwitchTime)
     {
-      nextSwitchTime = msNow + debounce;
+      nextSwitchTime = msNow + RELAY_DEBOUNCE_MS;
       RelayOn();
     }
   }
-  else if (relayStatus && Output < (msNow - windowStartTime))
+  else if (relayStatus && Output < PID_OUTPUT_RELAY_BOUND)
   {
     if (msNow > nextSwitchTime)
     {
-      nextSwitchTime = msNow + debounce;
+      nextSwitchTime = msNow + RELAY_DEBOUNCE_MS;
       RelayOff();
     }
   }
 }
 
+//**************        DEBUG   ***************
+
+
+#define DEBUG_TIMEOUT 500
+unsigned long nextDebugPrintTime = 0;
+void debugPrint()
+{
+  if (msNow < nextDebugPrintTime)
+    return;
+  nextDebugPrintTime += 500;
+  Serial.print(Setpoint);
+  Serial.print('\t');
+  Serial.print(Input);
+  Serial.print('\t');
+  Serial.print(Output);
+  Serial.print('\t');
+  Serial.print(dP * 100);
+  Serial.print('\t');
+  Serial.print(dI * 100);
+  Serial.print('\t');
+  Serial.print(dD * 100);
+  Serial.println();
+}
+
+//************      SETUP   ********************
 void setup()
 {
-  // Serial.begin(115200);
+  Serial.begin(115200);
   lcd.begin(16, 2);
   pinMode(CONTRAST_PIN, OUTPUT);
   pinMode(LCD_LED_PIN, OUTPUT);
@@ -200,15 +246,6 @@ void setup()
           NOMINAL_TEMPERATURE,
           B_VALUE),
       SMOOTHING_FACTOR);
-  // thermistor = new NTC_Thermistor(
-  //     SENSOR_PIN,
-  //     REFERENCE_RESISTANCE,
-  //     NOMINAL_RESISTANCE,
-  //     NOMINAL_TEMPERATURE,
-  //     B_VALUE);
-  myPID.SetOutputLimits(0, windowSize);
-  myPID.SetSampleTimeUs(windowSize * 1000);
-  myPID.SetMode(myPID.Control::automatic);
 }
 
 void loop()
@@ -217,17 +254,18 @@ void loop()
   checkKeys();
   readTemperature();
   lcdPrint();
-
+#ifdef DEBUG
+  debugPrint();
+#endif
   switch (plateMode)
   {
   case OFF:
     RelayOff();
     break;
-  case MODE0:
+  case MODE0: // Режим преднагрева. Выход на заданную температуру и удержание
     checkPID();
     break;
-  case MODE1:
-    // TODO: автоматический режим кривой оплавления
+  case MODE1: // TODO: автоматический режим кривой оплавления
     break;
 
   default:
