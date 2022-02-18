@@ -9,7 +9,7 @@
 #define NOMINAL_RESISTANCE 100000
 #define NOMINAL_TEMPERATURE 25
 #define B_VALUE 3950
-#define SMOOTHING_FACTOR 5
+#define SMOOTHING_FACTOR 15
 
 #define CONTRAST_PIN 3
 #define LCD_LED_PIN 9
@@ -32,7 +32,7 @@ enum PlateMode
 
 #ifdef DEBUG
 PlateMode plateMode = MODE0;
-float Setpoint = 300.0;
+float Setpoint = 285.0;
 #else
 PlateMode plateMode = OFF;
 float Setpoint = 150.0;
@@ -149,11 +149,10 @@ void checkKeys()
 #define PID_TIMEOUT_MS 100
 #define PID_ELAPSED_TIME_S (float)PID_TIMEOUT_MS / 1000.0
 #define RELAY_DEBOUNCE_MS 500
-#define PID_MIN 0
-#define PID_MAX 350
 #define PID_OUTPUT_RELAY_BOUND 100
+#define PID_MIN 0
+#define PID_MAX PID_OUTPUT_RELAY_BOUND * 2
 float Kp = 0.1, Ki = 0.1, Kd = 0.01;
-const unsigned long windowSize = 5000;
 float dP, dI, dD;
 float errorPID, pervErrorPID;
 
@@ -197,7 +196,6 @@ void checkPID()
 
 //**************        DEBUG   ***************
 
-
 #define DEBUG_TIMEOUT 500
 unsigned long nextDebugPrintTime = 0;
 void debugPrint()
@@ -211,11 +209,11 @@ void debugPrint()
   Serial.print('\t');
   Serial.print(Output);
   Serial.print('\t');
-  Serial.print(dP * 100);
+  Serial.print(dP);
   Serial.print('\t');
-  Serial.print(dI * 100);
+  Serial.print(dI);
   Serial.print('\t');
-  Serial.print(dD * 100);
+  Serial.print(dD);
   Serial.println();
 }
 
