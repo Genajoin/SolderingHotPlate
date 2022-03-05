@@ -11,7 +11,7 @@
 #define KEY_BACK_PIN 17
 
 #define KEY_TIMEOUT 200
-#define LCD_TIMEOUT 500
+#define LCD_TIMEOUT 1000
 
 enum PlateMode
 {
@@ -103,27 +103,124 @@ void lcdPrint()
 }
 
 //********************         TERMISTOR    **************
+// расчет через табличную апроксимацию
+// источник https://aterlux.ru/article/ntcresistor
+
+// Значение температуры, возвращаемое если сумма результатов АЦП больше первого значения таблицы
+#define TEMPERATURE_UNDER 0
+// Значение температуры, возвращаемое если сумма результатов АЦП меньше последнего значения таблицы
+#define TEMPERATURE_OVER 300
+// Значение температуры соответствующее первому значению таблицы
+#define TEMPERATURE_TABLE_START 5
+// Шаг таблицы
+#define TEMPERATURE_TABLE_STEP 5
+
+// Тип каждого элемента в таблице, если сумма выходит в пределах 16 бит - uint16_t, иначе - uint32_t
+typedef uint16_t temperature_table_entry_type;
+// Тип индекса таблицы. Если в таблице больше 256 элементов, то uint16_t, иначе - uint8_t
+typedef uint8_t temperature_table_index_type;
+// Метод доступа к элементу таблицы, должна соответствовать temperature_table_entry_type
+#define TEMPERATURE_TABLE_READ(i) pgm_read_word(&termo_table[i])
+
+const temperature_table_entry_type termo_table[] PROGMEM = {
+    64478, 64166, 63780, 63307, 62735, 62050, 61239, 60290, 59193, 57938, 56521, 54941, 53200, 51308, 49278, 47127, 44879, 42557, 40190, 37805, 35429, 33087, 30802, 28594, 26477, 24464, 22562, 20778, 19111, 17562, 16129, 14807, 13591, 12475, 11453, 10519, 9665, 8887, 8176, 7529, 6939, 6401, 5910, 5462, 5054, 4681, 4340, 4028, 3743, 3482, 3242, 3022, 2820, 2635, 2464, 2307, 2162, 2028, 1904, 1790};
+
+// Функция вычисляет значение температуры в десятых долях градусов Цельсия
+// в зависимости от суммарного значения АЦП.
+int16_t calc_temperature(temperature_table_entry_type adcsum)
+{
+  temperature_table_index_type l = 0;
+  temperature_table_index_type r = (sizeof(termo_table) / sizeof(termo_table[0])) - 1;
+  temperature_table_entry_type thigh = TEMPERATURE_TABLE_READ(r);
+
+  // Проверка выхода за пределы и граничных значений
+  if (adcsum <= thigh)
+  {
+#ifdef TEMPERATURE_UNDER
+    if (adcsum < thigh)
+      return TEMPERATURE_UNDER;
+#endif
+    return TEMPERATURE_TABLE_STEP * r + TEMPERATURE_TABLE_START;
+  }
+  temperature_table_entry_type tlow = TEMPERATURE_TABLE_READ(0);
+  if (adcsum >= tlow)
+  {
+#ifdef TEMPERATURE_OVER
+    if (adcsum > tlow)
+      return TEMPERATURE_OVER;
+#endif
+    return TEMPERATURE_TABLE_START;
+  }
+
+  // Двоичный поиск по таблице
+  while ((r - l) > 1)
+  {
+    temperature_table_index_type m = (l + r) >> 1;
+    temperature_table_entry_type mid = TEMPERATURE_TABLE_READ(m);
+    if (adcsum > mid)
+    {
+      r = m;
+    }
+    else
+    {
+      l = m;
+    }
+  }
+  temperature_table_entry_type vl = TEMPERATURE_TABLE_READ(l);
+  if (adcsum >= vl)
+  {
+    return l * TEMPERATURE_TABLE_STEP + TEMPERATURE_TABLE_START;
+  }
+  temperature_table_entry_type vr = TEMPERATURE_TABLE_READ(r);
+  temperature_table_entry_type vd = vl - vr;
+  int16_t res = TEMPERATURE_TABLE_START + r * TEMPERATURE_TABLE_STEP;
+  if (vd)
+  {
+    // Линейная интерполяция
+    res -= ((TEMPERATURE_TABLE_STEP * (int32_t)(adcsum - vr) + (vd >> 1)) / vd);
+  }
+  return res;
+}
+
 #define SENSOR_PIN A0
+#define ADC_AVERAGE_MAX 64
+uint16_t adcSensorValue;
+uint8_t adcCount = 0;
+
+// основная версия получения температуры
+void readTemperature()
+{
+  adcSensorValue += analogRead(SENSOR_PIN);
+  if (++adcCount < ADC_AVERAGE_MAX)
+    return;
+  int16_t t = calc_temperature(adcSensorValue);
+  adcCount = 0;
+  adcSensorValue = 0;
+  Input = t;
+}
+
+/// Версия прямого расчета температуры по формуле
+// + просто
+// - медленно за счет log & float, неточно на больших температурах
 #define REFERENCE_RESISTANCE 4700.f
 #define NOMINAL_RESISTANCE 100000.f
 #define NOMINAL_TEMPERATURE 25.f + 273.15f
 #define B_VALUE 3950.f
 #define SMOOTHING_FACTOR 12.f
 
-void readTemperature()
+void readTemperature_calcLog()
 {
-  const float resistance = REFERENCE_RESISTANCE / ((1023 / analogRead(SENSOR_PIN)) - 1);
-  float kelvin;
-  kelvin = resistance / NOMINAL_RESISTANCE; // (R/Ro)
-  kelvin = log(kelvin);                     // ln(R/Ro)
-  kelvin /= B_VALUE;                        // 1/B * ln(R/Ro)
-  kelvin += 1.0f / (NOMINAL_TEMPERATURE);   // + (1/To)
-  kelvin = 1.0f / kelvin;                   // Invert
-
-  Input = (Input * (SMOOTHING_FACTOR - 1.0f) + kelvin - 273.15f) / SMOOTHING_FACTOR;
-  // Input = kelvin - 273.15;
+  float kelvin = REFERENCE_RESISTANCE / (((1023.f / (float)adcSensorValue)) - 1);
+  kelvin = kelvin / NOMINAL_RESISTANCE;                // (R/Ro)
+  kelvin = log(kelvin);                                // ln(R/Ro)
+  kelvin = kelvin + (B_VALUE / (NOMINAL_TEMPERATURE)); // 1/B * ln(R/Ro)
+  kelvin = B_VALUE / kelvin;                           // Invert
+  float celsius = kelvin - 273.15f;
+  celsius = (celsius > 0) ? celsius : 0;
+  Input = (Input * (SMOOTHING_FACTOR - 1.0f) + celsius) / SMOOTHING_FACTOR;
 }
 
+//****************       KEY    ***********************
 void checkKeys()
 {
   if ((msNow < nextKeyTime))
@@ -226,7 +323,7 @@ void debugPrint()
 //************      SETUP   ********************
 void setup()
 {
-  Serial.begin(115200);
+  Serial.begin(57600);
   lcd.begin(16, 2);
   pinMode(CONTRAST_PIN, OUTPUT);
   pinMode(LCD_LED_PIN, OUTPUT);
