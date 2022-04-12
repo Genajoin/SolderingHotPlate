@@ -11,30 +11,85 @@
 #define KEY_BACK_PIN 17
 
 #define KEY_TIMEOUT 200
-#define LCD_TIMEOUT 1000
+#define LCD_TIMEOUT 500
 
 enum PlateMode
 {
   OFF = 0,
   MODE0,
-  MODE1
+  MODE1,
+  INIT
 };
 
+enum SolderModeEnum
+{
+  Start = 0,
+  Preheat,
+  Soak,
+  Reflow,
+  ReflowHold,
+  Cooling,
+  Stop
+};
+
+PlateMode plateMode = INIT;
 #ifdef DEBUG
-PlateMode plateMode = MODE0;
-float Setpoint = 285.0;
+SolderModeEnum solderMode = Start;
+float Setpoint = 100.0;
 #else
-PlateMode plateMode = OFF;
+SolderModeEnum solderMode = Stop;
 float Setpoint = 150.0;
 #endif
 int contrast = 116;  // init pwm [0;255]
 int ledBright = 100; // init pwm [0;255]
 const char array1[] = "HeatPlateAlpisto";
+const String selderModeMessage[7] = {"Start",
+                                     "Preheat",
+                                     "Soak",
+                                     "Reflow",
+                                     "ReflowHold",
+                                     "Cooling",
+                                     "Stop"};
+const String plateModeMessage[4] = {"OFF",
+                                    "M0",
+                                    "M1",
+                                    "INIT"};
 unsigned long msNow;
-unsigned long windowStartTime, nextSwitchTime, nextLcdTime, nextKeyTime;
+unsigned long windowStartTime, nextSwitchTime, nextLcdTime, nextKeyTime, modeStopTimeout, modeStartTimeout;
 float Input, Output;
 bool relayStatus = false;
 LiquidCrystal lcd(12, 11, 2, 4, 6, 7);
+void debugPrintNow();
+
+SolderModeEnum &operator++(SolderModeEnum &stackID)
+{
+  switch (stackID)
+  {
+  case Start:
+    return stackID = Preheat;
+  case Preheat:
+    return stackID = Soak;
+  case Soak:
+    return stackID = Reflow;
+  case Reflow:
+    return stackID = ReflowHold;
+  case ReflowHold:
+    return stackID = Cooling;
+  case Cooling:
+    return stackID = Stop;
+  case Stop:
+    return stackID = Start;
+  }
+  return stackID;
+}
+SolderModeEnum operator++(SolderModeEnum &stackID, int)
+{
+  SolderModeEnum tmp(stackID);
+  ++stackID;
+  return tmp;
+}
+
+//**************    UTIL   ***************
 
 void toneOn()
 {
@@ -73,7 +128,9 @@ void lcdPrint()
   nextLcdTime += LCD_TIMEOUT;
   lcd.clear();
   lcd.setCursor(0, 0);
-  lcd.print(array1);
+  lcd.print(selderModeMessage[solderMode]);
+  lcd.setCursor(12, 0);
+  lcd.print(msNow > modeStopTimeout ? 0 : (modeStopTimeout - msNow) / 1000);
   lcd.setCursor(0, 1);
   lcd.print("T:");
   lcd.setCursor(2, 1);
@@ -83,18 +140,7 @@ void lcdPrint()
   lcd.setCursor(8, 1);
   lcd.print(Setpoint, 0);
   lcd.setCursor(12, 1);
-  switch (plateMode)
-  {
-  case MODE0:
-    lcd.print("M0");
-    break;
-  case MODE1:
-    lcd.print("M1");
-    break;
-  default:
-    lcd.print("OFF");
-    break;
-  }
+  lcd.print(plateModeMessage[plateMode]);
   if (relayStatus)
   {
     lcd.setCursor(15, 1);
@@ -109,11 +155,11 @@ void lcdPrint()
 // Значение температуры, возвращаемое если сумма результатов АЦП больше первого значения таблицы
 #define TEMPERATURE_UNDER 0
 // Значение температуры, возвращаемое если сумма результатов АЦП меньше последнего значения таблицы
-#define TEMPERATURE_OVER 300
+#define TEMPERATURE_OVER 3000
 // Значение температуры соответствующее первому значению таблицы
-#define TEMPERATURE_TABLE_START 5
+#define TEMPERATURE_TABLE_START 50
 // Шаг таблицы
-#define TEMPERATURE_TABLE_STEP 5
+#define TEMPERATURE_TABLE_STEP 50
 
 // Тип каждого элемента в таблице, если сумма выходит в пределах 16 бит - uint16_t, иначе - uint32_t
 typedef uint16_t temperature_table_entry_type;
@@ -169,11 +215,11 @@ int16_t calc_temperature(temperature_table_entry_type adcsum)
   temperature_table_entry_type vl = TEMPERATURE_TABLE_READ(l);
   if (adcsum >= vl)
   {
-    return l * TEMPERATURE_TABLE_STEP + TEMPERATURE_TABLE_START;
+    return (l * TEMPERATURE_TABLE_STEP + TEMPERATURE_TABLE_START);
   }
   temperature_table_entry_type vr = TEMPERATURE_TABLE_READ(r);
   temperature_table_entry_type vd = vl - vr;
-  int16_t res = TEMPERATURE_TABLE_START + r * TEMPERATURE_TABLE_STEP;
+  int16_t res = (TEMPERATURE_TABLE_START + r * TEMPERATURE_TABLE_STEP);
   if (vd)
   {
     // Линейная интерполяция
@@ -196,7 +242,7 @@ void readTemperature()
   int16_t t = calc_temperature(adcSensorValue);
   adcCount = 0;
   adcSensorValue = 0;
-  Input = t;
+  Input = (float)t / 10.f;
 }
 
 /// Версия прямого расчета температуры по формуле
@@ -251,13 +297,21 @@ void checkKeys()
 //*****************    PID    ************
 #define PID_TIMEOUT_MS 100
 #define PID_ELAPSED_TIME_S (float)PID_TIMEOUT_MS / 1000.0
-#define RELAY_DEBOUNCE_MS 500
-#define PID_OUTPUT_RELAY_BOUND 100
+#define RELAY_DEBOUNCE_MS 100
+// #define PID_OUTPUT_RELAY_BOUND 100
 #define PID_MIN 0
-#define PID_MAX PID_OUTPUT_RELAY_BOUND * 2
-float Kp = 0.1, Ki = 0.1, Kd = 0.01;
+#define PID_MAX 100.f
+#define KDT 8.f
+#define KVA0 6.f
+#define KVA1 -0.023f // v(T) = kva0 + kva1*T
+// #define KTA0 (KVA0 * KDT) // T1 = T+v(T)*dt
+// #define KTA1 (1.f + (KVA1 * KDT))
+
+// https://www.rentanadviser.com/pid-fuzzy-logic/pid-fuzzy-logic.aspx
+// float Kp = 0.1, Ki = 0.1, Kd = 0.01;
+float Kp = 0.9, Ki = 0.2, Kd = 0.01;
 float dP, dI, dD;
-float errorPID, pervErrorPID;
+float errorPID, pervErrorPID, dInput, dIntegral;
 
 inline float limit(float *val)
 {
@@ -267,59 +321,149 @@ inline float limit(float *val)
 
 void checkPID()
 {
-  if (msNow < PID_TIMEOUT_MS)
+  if (msNow < windowStartTime)
     return;
   windowStartTime += PID_TIMEOUT_MS;
   pervErrorPID = errorPID;
-  errorPID = Setpoint - Input;
+  if (relayStatus)
+  {
+    dIntegral += (KVA0 + KVA1 * Input) * PID_ELAPSED_TIME_S * KDT;
+  }
+  else
+  {
+    dIntegral -= (KVA0 + KVA1 * Input) * PID_ELAPSED_TIME_S;
+    dIntegral = dIntegral > 0 ? dIntegral : 0;
+  }
+  dInput = Input + dIntegral;
+  errorPID = Setpoint - dInput;
   dP = Kp * errorPID;
   dI += Ki * errorPID * PID_ELAPSED_TIME_S;
-  dD = Kd * (errorPID - pervErrorPID) / PID_ELAPSED_TIME_S;
+  dD = Kd * (errorPID - pervErrorPID) / dI;
   dI = limit(&dI);
   Output = dP + dI + dD;
   Output = limit(&Output);
-
-  if (!relayStatus && Output > PID_OUTPUT_RELAY_BOUND)
+  /////////////////////////////////////////
+  if (!relayStatus && (dInput < Setpoint) && (Output > 10.f))
   {
-    if (msNow > nextSwitchTime)
-    {
-      nextSwitchTime = msNow + RELAY_DEBOUNCE_MS;
-      RelayOn();
-    }
+    RelayOn();
+    debugPrintNow();
   }
-  else if (relayStatus && Output < PID_OUTPUT_RELAY_BOUND)
+  else if (relayStatus && (dInput > Setpoint))
   {
-    if (msNow > nextSwitchTime)
-    {
-      nextSwitchTime = msNow + RELAY_DEBOUNCE_MS;
-      RelayOff();
-    }
+    RelayOff();
+    debugPrintNow();
   }
+  /////////////////////////////////////////
+  // if (!relayStatus && (Input < Setpoint) && (dInput < Setpoint))
+  // {
+  //   if (msNow > nextSwitchTime)
+  //   {
+  //     nextSwitchTime = msNow + RELAY_DEBOUNCE_MS;
+  //     RelayOn();
+  //     debugPrintNow();
+  //   }
+  // }
+  // else if (relayStatus && (dInput > Setpoint))
+  // {
+  //   if (msNow > nextSwitchTime)
+  //   {
+  //     nextSwitchTime = msNow + RELAY_DEBOUNCE_MS * 5;
+  //     RelayOff();
+  //     debugPrintNow();
+  //   }
+  // }
 }
 
+// ======================   MODE   =========================
+#define HEAT_DEBOUNCE_MS 2000
+uint32_t modeTimeToHeat0ms[6] = {0, 60000, 120000, 10000, 1, 1000};
+uint32_t mode0ms[6] = {0, 60000, 120000, 10000, 20000, 1000};
+// float mode0T[6] = {0, 150.f, 165.f, 225.f, 235.f, 20.f};
+float mode0T[6] = {20.f, 50.f, 65.f, 85.f, 95.f, 20.f};
+float mode0TFrom[6] = {20.f, 20.f, 50.f, 65.f, 85.f, 95.f};
+
+uint32_t nextSetT = 0;
+bool setTemperatureByTime(float T0, float T1, uint32_t t0, uint32_t t1)
+{
+  if (nextSetT > msNow || t1 < msNow)
+    return false;
+  nextSetT = msNow + HEAT_DEBOUNCE_MS;
+  Setpoint = T0 + ((T1 - T0) * (msNow - t0) / (t1 - t0));
+  return true;
+}
+
+// SolderModeEnum mode0(float temperature)
+// {
+//   setTemperatureByTime(temperature, msNow + HEAT_DEBOUNCE_MS);
+//   checkPID();
+// }
+
+/*
+Зона	          Свинец (Sn63 Pb37)
+Разогреть	      до 150 °C за 60 с
+Замочить	      от 150 °C до 165 °C за 120 с
+Перекомпоновать	Пиковая температура от 225 °C до 235 °C, удержание в течение 20 с.
+Охлаждение	    -4 °C/с или естественное охлаждение
+*/
+SolderModeEnum modeSn63Pb37()
+{
+  if (msNow > modeStopTimeout)
+  {
+    solderMode++;
+    modeStopTimeout = msNow + mode0ms[solderMode];
+    modeStartTimeout = msNow;
+  }
+  setTemperatureByTime(mode0TFrom[solderMode], mode0T[solderMode], modeStartTimeout, modeStopTimeout);
+  checkPID();
+
+  return solderMode;
+}
+// SolderModeEnum modeSn63Pb37(SolderModeEnum sNum)
+// {
+//   solderMode = sNum;
+//   return modeSn63Pb37();
+// }
+
+/*
+Зона	          Без свинца (SAC305)
+Разогреть       до 150 °C за 60 с
+Замочить		    от 150 °C до 180 °C за 120 с
+Перекомпоновать	Пиковая температура от 245 °C до 255 °C, удержание в течение 15 с.
+Охлаждение		  -4 °C/с или естественное охлаждение
+*/
+void modeSAC305()
+{
+}
 //**************        DEBUG   ***************
 
-#define DEBUG_TIMEOUT 500
+#define DEBUG_TIMEOUT 1000
 unsigned long nextDebugPrintTime = 0;
-void debugPrint()
+void debugPrintNow()
 {
-  if (msNow < nextDebugPrintTime)
-    return;
-  nextDebugPrintTime += 500;
-  Serial.print(Setpoint);
+  Serial.print(Setpoint, 1);
   Serial.print('\t');
-  Serial.print(Input);
+  Serial.print(Input, 1);
   Serial.print('\t');
-  Serial.print(Output);
+  Serial.print(Output, 1);
   Serial.print('\t');
   Serial.print(dP);
   Serial.print('\t');
   Serial.print(dI);
   Serial.print('\t');
   Serial.print(dD);
-  Serial.println();
+  Serial.print('\t');
+  Serial.print(errorPID);
+  Serial.print('\t');
+  Serial.print(dInput);
+  Serial.printf("\t%d\t%d\r\n", relayStatus, solderMode);
 }
-
+void debugPrint()
+{
+  if (msNow < nextDebugPrintTime)
+    return;
+  nextDebugPrintTime += DEBUG_TIMEOUT;
+  debugPrintNow();
+}
 //************      SETUP   ********************
 void setup()
 {
@@ -336,9 +480,11 @@ void setup()
 
   analogWrite(CONTRAST_PIN, contrast);
   analogWrite(LCD_LED_PIN, ledBright);
+  lcd.print(array1);
   toneOn();
   delay(500);
   toneOff();
+  delay(3000);
 }
 
 void loop()
@@ -356,12 +502,28 @@ void loop()
     RelayOff();
     break;
   case MODE0: // Режим преднагрева. Выход на заданную температуру и удержание
+    // RelayOn();
     checkPID();
     break;
   case MODE1: // TODO: автоматический режим кривой оплавления
+    if (modeSn63Pb37() == Stop)
+    {
+      RelayOff();
+      toneKeyPress();
+      plateMode = OFF;
+    }
     break;
 
   default:
+    if (Input != 0.f)
+    {
+#ifdef DEBUG
+      plateMode = MODE0;
+      Setpoint = Input + 10;
+#else
+      plateMode = OFF;
+#endif
+    }
     break;
   }
 }
