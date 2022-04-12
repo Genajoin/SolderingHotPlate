@@ -284,12 +284,14 @@ void checkKeys()
   }
   if (digitalRead(KEY_OK_PIN) == LOW)
   {
-    plateMode = MODE0;
+    //    plateMode = MODE0;
+    solderMode = Start;
     toneKeyPress();
   }
   if (digitalRead(KEY_BACK_PIN) == LOW)
   {
-    plateMode = OFF;
+    //    plateMode = OFF;
+    solderMode = Stop;
     toneKeyPress();
   }
 }
@@ -303,7 +305,7 @@ void checkKeys()
 #define PID_MAX 100.f
 #define KDT 8.f
 #define KVA0 6.f
-#define KVA1 -0.023f // v(T) = kva0 + kva1*T
+#define KVA1 0.023f // v(T) = kva0 + kva1*T
 // #define KTA0 (KVA0 * KDT) // T1 = T+v(T)*dt
 // #define KTA1 (1.f + (KVA1 * KDT))
 
@@ -327,13 +329,13 @@ void checkPID()
   pervErrorPID = errorPID;
   if (relayStatus)
   {
-    dIntegral += (KVA0 + KVA1 * Input) * PID_ELAPSED_TIME_S * KDT;
+    dIntegral += (KVA0 - (KVA1 * Input)) * PID_ELAPSED_TIME_S * KDT;
   }
   else
   {
-    dIntegral -= (KVA0 + KVA1 * Input) * PID_ELAPSED_TIME_S;
-    dIntegral = dIntegral > 0 ? dIntegral : 0;
+    dIntegral -= (KVA0 - (KVA1 * Input)) * PID_ELAPSED_TIME_S * dIntegral / 10.f;
   }
+  dIntegral = dIntegral > 0 ? dIntegral : 0;
   dInput = Input + dIntegral;
   errorPID = Setpoint - dInput;
   dP = Kp * errorPID;
@@ -343,44 +345,30 @@ void checkPID()
   Output = dP + dI + dD;
   Output = limit(&Output);
   /////////////////////////////////////////
-  if (!relayStatus && (dInput < Setpoint) && (Output > 10.f))
+  if (!relayStatus && (dInput < Setpoint) && (Output > 0.1f))
   {
     RelayOn();
+#ifdef DEBUG
     debugPrintNow();
+#endif
   }
   else if (relayStatus && (dInput > Setpoint))
   {
     RelayOff();
+#ifdef DEBUG
     debugPrintNow();
+#endif
   }
-  /////////////////////////////////////////
-  // if (!relayStatus && (Input < Setpoint) && (dInput < Setpoint))
-  // {
-  //   if (msNow > nextSwitchTime)
-  //   {
-  //     nextSwitchTime = msNow + RELAY_DEBOUNCE_MS;
-  //     RelayOn();
-  //     debugPrintNow();
-  //   }
-  // }
-  // else if (relayStatus && (dInput > Setpoint))
-  // {
-  //   if (msNow > nextSwitchTime)
-  //   {
-  //     nextSwitchTime = msNow + RELAY_DEBOUNCE_MS * 5;
-  //     RelayOff();
-  //     debugPrintNow();
-  //   }
-  // }
 }
 
 // ======================   MODE   =========================
 #define HEAT_DEBOUNCE_MS 2000
-uint32_t modeTimeToHeat0ms[6] = {0, 60000, 120000, 10000, 1, 1000};
-uint32_t mode0ms[6] = {0, 60000, 120000, 10000, 20000, 1000};
-// float mode0T[6] = {0, 150.f, 165.f, 225.f, 235.f, 20.f};
-float mode0T[6] = {20.f, 50.f, 65.f, 85.f, 95.f, 20.f};
-float mode0TFrom[6] = {20.f, 20.f, 50.f, 65.f, 85.f, 95.f};
+//                 Start,Preheat,  Soak,Reflow,ReflowHold,Cooling
+uint32_t mode0ms[6] = {0, 60000, 120000, 1000, 60000, 20000};
+// uint32_t modeTimeToHeat0ms[6] = {0, 60000, 120000, 1000, 1, 10000};
+float mode0T[6] = {20.f, 150.f, 165.f, 225.f, 235.f, 20.f};
+// float mode0T[6] = {20.f, 50.f, 65.f, 85.f, 95.f, 20.f};
+float mode0TFrom[6] = {mode0T[0], mode0T[0], mode0T[1], mode0T[2], mode0T[3], mode0T[4]};
 
 uint32_t nextSetT = 0;
 bool setTemperatureByTime(float T0, float T1, uint32_t t0, uint32_t t1)
@@ -392,11 +380,16 @@ bool setTemperatureByTime(float T0, float T1, uint32_t t0, uint32_t t1)
   return true;
 }
 
-// SolderModeEnum mode0(float temperature)
-// {
-//   setTemperatureByTime(temperature, msNow + HEAT_DEBOUNCE_MS);
-//   checkPID();
-// }
+SolderModeEnum mode0()
+{
+  if (solderMode == Stop)
+  {
+    RelayOff();
+    return;
+  }
+  setTemperatureByTime(Setpoint, Setpoint, msNow, msNow);
+  checkPID();
+}
 
 /*
 Зона	          Свинец (Sn63 Pb37)
@@ -407,6 +400,12 @@ bool setTemperatureByTime(float T0, float T1, uint32_t t0, uint32_t t1)
 */
 SolderModeEnum modeSn63Pb37()
 {
+  if (solderMode == Stop)
+  {
+    RelayOff();
+    return;
+  }
+
   if (msNow > modeStopTimeout)
   {
     solderMode++;
@@ -455,6 +454,8 @@ void debugPrintNow()
   Serial.print(errorPID);
   Serial.print('\t');
   Serial.print(dInput);
+  Serial.print('\t');
+  Serial.print(dIntegral);
   Serial.printf("\t%d\t%d\r\n", relayStatus, solderMode);
 }
 void debugPrint()
@@ -493,35 +494,27 @@ void loop()
   checkKeys();
   readTemperature();
   lcdPrint();
-#ifdef DEBUG
   debugPrint();
-#endif
   switch (plateMode)
   {
   case OFF:
     RelayOff();
     break;
   case MODE0: // Режим преднагрева. Выход на заданную температуру и удержание
-    // RelayOn();
-    checkPID();
+    mode0();
     break;
   case MODE1: // TODO: автоматический режим кривой оплавления
-    if (modeSn63Pb37() == Stop)
-    {
-      RelayOff();
-      toneKeyPress();
-      plateMode = OFF;
-    }
+    modeSn63Pb37();
     break;
 
   default:
     if (Input != 0.f)
     {
 #ifdef DEBUG
-      plateMode = MODE0;
-      Setpoint = Input + 10;
+      plateMode = MODE1;
+      // Setpoint = Input + 10;
 #else
-      plateMode = OFF;
+      plateMode = MODE1;
 #endif
     }
     break;
