@@ -376,7 +376,7 @@ float mode2TFrom[6] = {mode2T[0], mode2T[0], mode2T[1], mode2T[2], mode2T[3], mo
 
 void modeSAC305()
 {
-    if (solderMode == Stop)
+  if (solderMode == Stop)
   {
     RelayOff();
     return;
@@ -397,9 +397,9 @@ void modeSAC305()
 unsigned long nextDebugPrintTime = 0;
 void debugPrintNow()
 {
-  Serial.print(Setpoint, 1);
-  Serial.print('\t');
   Serial.print(Input, 1);
+  Serial.print('\t');
+  Serial.print(Setpoint, 1);
   Serial.print('\t');
   Serial.print(Output, 1);
   Serial.print('\t');
