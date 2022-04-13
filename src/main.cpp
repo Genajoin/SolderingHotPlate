@@ -1,36 +1,6 @@
 #include <Arduino.h>
 #include "LiquidCrystal.h" // https://github.com/arduino-libraries/LiquidCrystal
-
-#define CONTRAST_PIN 3
-#define LCD_LED_PIN 9
-#define BUZZER_PIN 5 // PD5
-#define RELAY_PIN 8  // PB0
-#define KEY_OK_PIN 10
-#define KEY_PLUS_PIN 15
-#define KEY_MINUS_PIN 16
-#define KEY_BACK_PIN 17
-
-#define KEY_TIMEOUT 200
-#define LCD_TIMEOUT 500
-
-enum PlateMode
-{
-  OFF = 0,
-  MODE0,
-  MODE1,
-  INIT
-};
-
-enum SolderModeEnum
-{
-  Start = 0,
-  Preheat,
-  Soak,
-  Reflow,
-  ReflowHold,
-  Cooling,
-  Stop
-};
+#include "main.h"
 
 PlateMode plateMode = INIT;
 #ifdef DEBUG
@@ -50,44 +20,16 @@ const String selderModeMessage[7] = {"Start",
                                      "ReflowHold",
                                      "Cooling",
                                      "Stop"};
-const String plateModeMessage[4] = {"OFF",
+const String plateModeMessage[4] = {"INIT",
                                     "M0",
                                     "M1",
-                                    "INIT"};
+                                    "M2"};
 unsigned long msNow;
 unsigned long windowStartTime, nextSwitchTime, nextLcdTime, nextKeyTime, modeStopTimeout, modeStartTimeout;
 float Input, Output;
 bool relayStatus = false;
 LiquidCrystal lcd(12, 11, 2, 4, 6, 7);
 void debugPrintNow();
-
-SolderModeEnum &operator++(SolderModeEnum &stackID)
-{
-  switch (stackID)
-  {
-  case Start:
-    return stackID = Preheat;
-  case Preheat:
-    return stackID = Soak;
-  case Soak:
-    return stackID = Reflow;
-  case Reflow:
-    return stackID = ReflowHold;
-  case ReflowHold:
-    return stackID = Cooling;
-  case Cooling:
-    return stackID = Stop;
-  case Stop:
-    return stackID = Start;
-  }
-  return stackID;
-}
-SolderModeEnum operator++(SolderModeEnum &stackID, int)
-{
-  SolderModeEnum tmp(stackID);
-  ++stackID;
-  return tmp;
-}
 
 //**************    UTIL   ***************
 
@@ -285,13 +227,13 @@ void checkKeys()
   if (digitalRead(KEY_OK_PIN) == LOW)
   {
     //    plateMode = MODE0;
-    solderMode = Start;
+    solderMode++;
     toneKeyPress();
   }
   if (digitalRead(KEY_BACK_PIN) == LOW)
   {
     //    plateMode = OFF;
-    solderMode = Stop;
+    plateMode++;
     toneKeyPress();
   }
 }
@@ -364,10 +306,10 @@ void checkPID()
 // ======================   MODE   =========================
 #define HEAT_DEBOUNCE_MS 2000
 //                 Start,Preheat,  Soak,Reflow,ReflowHold,Cooling
-uint32_t mode0ms[6] = {0, 60000, 120000, 1000, 60000, 20000};
 // uint32_t modeTimeToHeat0ms[6] = {0, 60000, 120000, 1000, 1, 10000};
-float mode0T[6] = {20.f, 150.f, 165.f, 225.f, 235.f, 20.f};
 // float mode0T[6] = {20.f, 50.f, 65.f, 85.f, 95.f, 20.f};
+uint32_t mode0ms[6] = {0, 60000, 120000, 1000, 60000, 20000};
+float mode0T[6] = {20.f, 150.f, 165.f, 225.f, 235.f, 20.f};
 float mode0TFrom[6] = {mode0T[0], mode0T[0], mode0T[1], mode0T[2], mode0T[3], mode0T[4]};
 
 uint32_t nextSetT = 0;
@@ -380,15 +322,15 @@ bool setTemperatureByTime(float T0, float T1, uint32_t t0, uint32_t t1)
   return true;
 }
 
-SolderModeEnum mode0()
+void mode0()
 {
-  if (solderMode == Stop)
+  if (solderMode == Start)
   {
-    RelayOff();
+    checkPID();
     return;
   }
-  setTemperatureByTime(Setpoint, Setpoint, msNow, msNow);
-  checkPID();
+  solderMode = Stop;
+  RelayOff();
 }
 
 /*
@@ -398,7 +340,7 @@ SolderModeEnum mode0()
 Перекомпоновать	Пиковая температура от 225 °C до 235 °C, удержание в течение 20 с.
 Охлаждение	    -4 °C/с или естественное охлаждение
 */
-SolderModeEnum modeSn63Pb37()
+void modeSn63Pb37()
 {
   if (solderMode == Stop)
   {
@@ -414,8 +356,6 @@ SolderModeEnum modeSn63Pb37()
   }
   setTemperatureByTime(mode0TFrom[solderMode], mode0T[solderMode], modeStartTimeout, modeStopTimeout);
   checkPID();
-
-  return solderMode;
 }
 // SolderModeEnum modeSn63Pb37(SolderModeEnum sNum)
 // {
@@ -430,8 +370,26 @@ SolderModeEnum modeSn63Pb37()
 Перекомпоновать	Пиковая температура от 245 °C до 255 °C, удержание в течение 15 с.
 Охлаждение		  -4 °C/с или естественное охлаждение
 */
+uint32_t mode2ms[6] = {0, 60000, 120000, 1000, 60000, 20000};
+float mode2T[6] = {20.f, 150.f, 180.f, 245.f, 255.f, 20.f};
+float mode2TFrom[6] = {mode2T[0], mode2T[0], mode2T[1], mode2T[2], mode2T[3], mode2T[4]};
+
 void modeSAC305()
 {
+    if (solderMode == Stop)
+  {
+    RelayOff();
+    return;
+  }
+
+  if (msNow > modeStopTimeout)
+  {
+    solderMode++;
+    modeStopTimeout = msNow + mode2ms[solderMode];
+    modeStartTimeout = msNow;
+  }
+  setTemperatureByTime(mode2TFrom[solderMode], mode2T[solderMode], modeStartTimeout, modeStopTimeout);
+  checkPID();
 }
 //**************        DEBUG   ***************
 
@@ -497,14 +455,14 @@ void loop()
   debugPrint();
   switch (plateMode)
   {
-  case OFF:
-    RelayOff();
-    break;
   case MODE0: // Режим преднагрева. Выход на заданную температуру и удержание
     mode0();
     break;
-  case MODE1: // TODO: автоматический режим кривой оплавления
+  case MODE1: // автоматический режим кривой оплавления
     modeSn63Pb37();
+    break;
+  case MODE2: // автоматический режим кривой оплавления
+    modeSAC305();
     break;
 
   default:
